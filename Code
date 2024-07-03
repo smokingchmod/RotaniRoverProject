@@ -1,0 +1,309 @@
+#include <SoftwareSerial.h>
+#include <Wire.h>
+#include <ArduCAM.h>
+#include <SPI.h>
+#include <Servo.h>
+
+// Definicje pinów
+#define CS_PIN 7
+#define CAMERA_SERVO_PIN 8
+
+// Piny do sterowania silnikami (TB6612)
+const int E1 = 3; ///<Motor1 Speed
+const int E2 = 11; ///<Motor2 Speed
+const int E3 = 5; ///<Motor3 Speed
+const int E4 = 6; ///<Motor4 Speed
+
+const int M1 = 4; ///<Motor1 Direction
+const int M2 = 12; ///<Motor2 Direction
+const int M3 = 8; ///<Motor3 Direction
+const int M4 = 7; ///<Motor4 Direction
+
+// Piny do sterowania LED-ami
+const int ledPin3 = 4;
+const int ledPin4 = 12;
+
+// Przycisk do włączania i wyłączania łazika
+const int powerButtonPin = 3;
+
+// Przycisk do włączania i wyłączania LED-ów
+const int ledButtonPin = A0; // Przykładowy unikalny pin
+
+// Przycisk do robienia zdjęcia
+const int captureButtonPin = A2; // Przykładowy unikalny pin
+
+// Obiekty
+ArduCAM myCAM(OV7670, CS_PIN);   // Obiekt kamery
+SoftwareSerial Bluetooth(10, 11); // Komunikacja Bluetooth
+Servo cameraServo;                // Serwo do sterowania kamerą
+
+// Zmienne do przechowywania stanu kamery
+bool roverPower = false; // Stan zasilania łazika
+bool ledState = false; // Stan LED-ów (false - wyłączone, true - włączone)
+bool cameraEnabled = false;       // Zmienna do przechowywania stanu kamery
+int cameraServoAngle = 90;        // Początkowy kąt serwa (środek)
+
+void setup() {
+  // Ustawienie pinów jako wyjścia
+  pinMode(E1, OUTPUT);
+  pinMode(E2, OUTPUT);
+  pinMode(E3, OUTPUT);
+  pinMode(E4, OUTPUT);
+  pinMode(M1, OUTPUT);
+  pinMode(M2, OUTPUT);
+  pinMode(M3, OUTPUT);
+  pinMode(M4, OUTPUT);
+  pinMode(CS_PIN, OUTPUT);
+  pinMode(ledPin3, OUTPUT);
+  pinMode(ledPin4, OUTPUT);
+
+  // Ustawienie pinów jako wejścia (przyciski)
+  pinMode(powerButtonPin, INPUT_PULLUP);
+  pinMode(ledButtonPin, INPUT_PULLUP);
+  pinMode(captureButtonPin, INPUT_PULLUP); // Dodanie przycisku do robienia zdjęcia
+
+  // Inicjalizacja serwa kamery
+  cameraServo.attach(CAMERA_SERVO_PIN);
+  cameraServo.write(cameraServoAngle); // Ustawienie początkowego kąta serwa
+
+  // Zatrzymanie silników na start
+  stopMotors();
+
+  // Inicjalizacja kamery
+  Wire.begin();
+  myCAM.write_reg(0x12, 0x80); // Zresetowanie kamery
+  delay(1000);
+  myCAM.InitCAM();
+  myCAM.clear_fifo_flag();
+
+  // Rozpoczęcie komunikacji szeregowej z prędkością 9600 baud dla monitora szeregowego
+  Serial.begin(9600);
+  // Rozpoczęcie komunikacji szeregowej z prędkością 9600 baud dla modułu Bluetooth
+  Bluetooth.begin(9600);
+  Serial.println("Rotani inspection rover is ready for operation.");
+}
+
+void loop() {
+  // Obsługa przycisku do włączania i wyłączania łazika
+  if (digitalRead(powerButtonPin) == LOW) {
+    toggleRoverPower();
+  }
+
+  // Obsługa przycisku do włączania i wyłączania LED-ów
+  if (digitalRead(ledButtonPin) == LOW) {
+    toggleLEDs();
+  }
+
+  // Obsługa przycisku do robienia zdjęcia
+  if (digitalRead(captureButtonPin) == LOW) {
+    captureAndSendImage();
+  }
+
+  // Sprawdzenie, czy są dostępne dane od modułu Bluetooth
+  if (Bluetooth.available()) {
+    char data = Bluetooth.read();
+    Serial.print("Received command: ");
+    Serial.println(data);
+    handleCommands(data);
+  }
+
+  // Sprawdzenie, czy są dostępne dane od monitora szeregowego
+  if (Serial.available()) {
+    char data = Serial.read();
+    Bluetooth.print(data);
+  }
+
+  // Obsługa stanu LED-ów
+  if (ledState) {
+    turnOnLEDs();
+  } else {
+    turnOffLEDs();
+  }
+
+  // Jeśli kamera jest włączona, zrób zdjęcie i wyślij przez Bluetooth
+  if (cameraEnabled) {
+    captureAndSendImage();
+  }
+}
+
+void handleCommands(char command) {
+  switch (command) {
+    case 'W': // Do przodu
+      moveForward();
+      break;
+    case 'S': // Do tyłu
+      moveBackward();
+      break;
+    case 'A': // Skręt w lewo
+      turnLeft();
+      break;
+    case 'D': // Skręt w prawo
+      turnRight();
+      break;
+    case ' ': // Stop (spacja)
+      stopMotors();
+      break;
+    case 'Q': // Obrót serwomechanizmem w lewo
+      cameraServoLeft();
+      break;
+    case 'E': // Obrót serwomechanizmem w prawo
+      cameraServoRight();
+      break;
+    case 'C': // Włącz/wyłącz kamerę
+      toggleCamera();
+      break;
+    case '1': // Włącz/wyłącz zasilanie
+      toggleRoverPower();
+      break;
+    case '2': // Zrób zdjęcie
+      captureAndSendImage();
+      break;
+    case '3': // Włącz/wyłącz LED-y
+      toggleLEDs();
+      break;
+    default:
+      stopMotors();
+      break;
+  }
+}
+
+void moveForward() {
+  M1_advance(255);
+  M2_advance(255);
+  M3_advance(255);
+  M4_advance(255);
+}
+
+void moveBackward() {
+  M1_back(255);
+  M2_back(255);
+  M3_back(255);
+  M4_back(255);
+}
+
+void turnLeft() {
+  M1_back(255);
+  M2_advance(255);
+  M3_back(255);
+  M4_advance(255);
+}
+
+void turnRight() {
+  M1_advance(255);
+  M2_back(255);
+  M3_advance(255);
+  M4_back(255);
+}
+
+void stopMotors() {
+  analogWrite(E1, 0);
+  analogWrite(E2, 0);
+  analogWrite(E3, 0);
+  analogWrite(E4, 0);
+}
+
+void powerOn() {
+  roverPower = true;
+}
+
+void powerOff() {
+  roverPower = false;
+  stopMotors();
+}
+
+void toggleRoverPower() {
+  if (roverPower) {
+    powerOff();
+  } else {
+    powerOn();
+  }
+}
+
+void toggleLEDs() {
+  ledState = !ledState;
+}
+
+void turnOnLEDs() {
+  digitalWrite(ledPin3, HIGH);
+  digitalWrite(ledPin4, HIGH);
+}
+
+void turnOffLEDs() {
+  digitalWrite(ledPin3, LOW);
+  digitalWrite(ledPin4, LOW);
+}
+
+void captureAndSendImage() {
+  myCAM.clear_fifo_flag();
+  myCAM.start_capture();
+  while (!myCAM.get_bit(ARDUCHIP_TRIG, CAP_DONE_MASK));
+  Serial.println("Photo captured.");
+
+  myCAM.CS_LOW();
+  myCAM.set_fifo_burst();
+  while (myCAM.read_fifo() != 0) {
+    uint8_t temp = SPI.transfer(0x00);
+    Bluetooth.write(temp);
+  }
+  myCAM.CS_HIGH();
+}
+
+void cameraServoLeft() {
+  cameraServoAngle -= 10; // Obrót o 10 stopni w lewo
+  if (cameraServoAngle < 0) {
+    cameraServoAngle = 0; // Ograniczenie minimalnego kąta do 0 stopni
+  }
+  cameraServo.write(cameraServoAngle);
+}
+
+void cameraServoRight() {
+  cameraServoAngle += 10; // Obrót o 10 stopni w prawo
+  if (cameraServoAngle > 180) {
+    cameraServoAngle = 180; // Ograniczenie maksymalnego kąta do 180 stopni
+  }
+  cameraServo.write(cameraServoAngle);
+}
+
+void toggleCamera() {
+  cameraEnabled = !cameraEnabled; // Przełączanie stanu kamery
+  if (cameraEnabled) {
+    Serial.println("Camera turned on.");
+  } else {
+    Serial.println("Camera turned off.");
+  }
+}
+
+// Funkcje do sterowania silnikami przy użyciu nowego sterownika
+void M1_advance(char Speed) {
+  digitalWrite(M1, LOW);
+  analogWrite(E1, Speed);
+}
+void M2_advance(char Speed) {
+  digitalWrite(M2, HIGH);
+  analogWrite(E2, Speed);
+}
+void M3_advance(char Speed) {
+  digitalWrite(M3, LOW);
+  analogWrite(E3, Speed);
+}
+void M4_advance(char Speed) {
+  digitalWrite(M4, HIGH);
+  analogWrite(E4, Speed);
+}
+
+void M1_back(char Speed) {
+  digitalWrite(M1, HIGH);
+  analogWrite(E1, Speed);
+}
+void M2_back(char Speed) {
+  digitalWrite(M2, LOW);
+  analogWrite(E2, Speed);
+}
+void M3_back(char Speed) {
+  digitalWrite(M3, HIGH);
+  analogWrite(E3, Speed);
+}
+void M4_back(char Speed) {
+  digitalWrite(M4, LOW);
+  analogWrite(E4, Speed);
+}
